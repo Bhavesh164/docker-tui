@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -65,6 +66,7 @@ var (
 	cursorStyle        = lipgloss.NewStyle().Background(lipgloss.Color("230")).Foreground(lipgloss.Color("16"))
 	activeSectionStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("86")).Padding(0, 1)
 	matchStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("221")).Bold(true)
+	logSelectionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
 	logErrorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	logWarnStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	logInfoStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
@@ -548,6 +550,12 @@ type model struct {
 	logXOffset      int
 	logSearchActive bool
 	logsFullscreen  bool
+	logSelecting    bool
+	logSelectionOn  bool
+	logSelStartLine int
+	logSelStartCol  int
+	logSelEndLine   int
+	logSelEndCol    int
 	followLogs      bool
 	activeLogID     string
 	activeLogName   string
@@ -958,6 +966,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logSearchActive = false
 				m.logSearch.SetValue("")
 				m.logSearch.Blur()
+				m.clearLogSelection()
 				m.mode = viewMain
 				return m, tea.ShowCursor
 			}
@@ -1064,6 +1073,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.clampLogCursor()
 				return m, nil
 			}
+		case "y":
+			if m.mode == viewLogs {
+				selected := m.logSelectionText()
+				if selected == "" {
+					m.status = "no selected logs to copy"
+					return m, nil
+				}
+				if err := writeClipboardText(selected); err != nil {
+					m.status = fmt.Sprintf("clipboard copy failed: %v", err)
+				} else {
+					m.status = fmt.Sprintf("copied %d chars from logs to clipboard", runeWidth(selected))
+				}
+				return m, nil
+			}
+		case "c":
+			if m.mode == viewLogs {
+				m.clearLogSelection()
+				m.status = "log selection cleared"
+				return m, nil
+			}
 		case "N":
 			if m.mode == viewLogs && strings.TrimSpace(m.logSearch.Value()) != "" {
 				m.followLogs = false
@@ -1153,6 +1182,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logCursor = 1 << 30
 				m.logXOffset = 0
 				m.logsFullscreen = false
+				m.clearLogSelection()
 				m.logSearchActive = false
 				m.logSearch.SetValue("")
 				m.logSearch.Blur()
@@ -1186,6 +1216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logSearchActive = false
 				m.logSearch.SetValue("")
 				m.logSearch.Blur()
+				m.clearLogSelection()
 				m.mode = viewMain
 				return m, tea.ShowCursor
 			}
@@ -1444,6 +1475,18 @@ func (m model) handleLogSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.logSearch.Blur()
 		m.clampLogCursor()
 		return m, tea.HideCursor
+	case "y":
+		selected := m.logSelectionText()
+		if selected == "" {
+			m.status = "no selected logs to copy"
+			return m, nil
+		}
+		if err := writeClipboardText(selected); err != nil {
+			m.status = fmt.Sprintf("clipboard copy failed: %v", err)
+		} else {
+			m.status = fmt.Sprintf("copied %d chars from logs to clipboard", runeWidth(selected))
+		}
+		return m, nil
 	case "up":
 		m.followLogs = false
 		if m.logCursor > 0 {
@@ -1471,7 +1514,9 @@ func (m model) handleLogSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.logSearch, cmd = m.logSearch.Update(msg)
 	m.followLogs = false
 	m.logCursor = 0
+	m.clearLogSelection()
 	m.clampLogCursor()
+	m.clampLogXOffset()
 	return m, cmd
 }
 
@@ -1495,6 +1540,42 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.logCursor += 3
 		m.clampLogCursor()
 		return m, nil
+	case tea.MouseButtonLeft:
+		switch msg.Action {
+		case tea.MouseActionPress:
+			if line, col, ok := m.mouseToLogPosition(msg.X, msg.Y); ok {
+				m.logSelecting = true
+				m.logSelectionOn = true
+				m.logSelStartLine, m.logSelStartCol = line, col
+				m.logSelEndLine, m.logSelEndCol = line, col
+				m.status = "selecting logs..."
+				return m, nil
+			}
+			m.clearLogSelection()
+			return m, nil
+		case tea.MouseActionMotion:
+			if m.logSelecting {
+				if line, col, ok := m.mouseToLogPosition(msg.X, msg.Y); ok {
+					m.logSelEndLine, m.logSelEndCol = line, col
+				}
+				return m, nil
+			}
+		case tea.MouseActionRelease:
+			if m.logSelecting {
+				m.logSelecting = false
+				if line, col, ok := m.mouseToLogPosition(msg.X, msg.Y); ok {
+					m.logSelEndLine, m.logSelEndCol = line, col
+				}
+				selected := m.logSelectionText()
+				if selected == "" {
+					m.clearLogSelection()
+					m.status = "log selection cleared"
+				} else {
+					m.status = fmt.Sprintf("selected %d chars • press y to copy", runeWidth(selected))
+				}
+				return m, nil
+			}
+		}
 	}
 	return m, nil
 }
@@ -1580,6 +1661,96 @@ func sliceRunes(s string, start, width int) string {
 	return string(r[start:end])
 }
 
+func minMax(a, b int) (int, int) {
+	if a <= b {
+		return a, b
+	}
+	return b, a
+}
+
+func (m *model) clearLogSelection() {
+	m.logSelecting = false
+	m.logSelectionOn = false
+	m.logSelStartLine = 0
+	m.logSelStartCol = 0
+	m.logSelEndLine = 0
+	m.logSelEndCol = 0
+}
+
+func (m model) normalizedLogSelection() (startLine, startCol, endLine, endCol int, ok bool) {
+	if !m.logSelectionOn {
+		return 0, 0, 0, 0, false
+	}
+	startLine, endLine = minMax(m.logSelStartLine, m.logSelEndLine)
+	if m.logSelStartLine < m.logSelEndLine {
+		startCol, endCol = m.logSelStartCol, m.logSelEndCol
+	} else if m.logSelStartLine > m.logSelEndLine {
+		startCol, endCol = m.logSelEndCol, m.logSelStartCol
+	} else {
+		startCol, endCol = minMax(m.logSelStartCol, m.logSelEndCol)
+	}
+	return startLine, startCol, endLine, endCol, true
+}
+
+func (m model) logSelectionText() string {
+	startLine, startCol, endLine, endCol, ok := m.normalizedLogSelection()
+	if !ok {
+		return ""
+	}
+	lines := m.filteredLogLines()
+	if len(lines) == 0 || startLine >= len(lines) {
+		return ""
+	}
+	if endLine >= len(lines) {
+		endLine = len(lines) - 1
+	}
+	out := make([]string, 0, endLine-startLine+1)
+	for i := startLine; i <= endLine; i++ {
+		line := strings.ReplaceAll(lines[i], "\t", "    ")
+		r := []rune(line)
+		lineStart := 0
+		lineEnd := len(r)
+		if i == startLine {
+			lineStart = min(max(startCol, 0), len(r))
+		}
+		if i == endLine {
+			lineEnd = min(max(endCol, 0), len(r))
+		}
+		if startLine == endLine && endCol < startCol {
+			lineStart, lineEnd = lineEnd, lineStart
+		}
+		if lineStart > lineEnd {
+			lineStart, lineEnd = lineEnd, lineStart
+		}
+		out = append(out, string(r[lineStart:lineEnd]))
+	}
+	return strings.Join(out, "\n")
+}
+
+func (m model) logLineSelectedRange(lineIndex int, visibleStart, visibleEnd int) (int, int, bool) {
+	startLine, startCol, endLine, endCol, ok := m.normalizedLogSelection()
+	if !ok || lineIndex < startLine || lineIndex > endLine {
+		return 0, 0, false
+	}
+	lineSelStart := 0
+	lineSelEnd := 1 << 30
+	if lineIndex == startLine {
+		lineSelStart = startCol
+	}
+	if lineIndex == endLine {
+		lineSelEnd = endCol
+	}
+	if lineSelEnd < lineSelStart {
+		lineSelStart, lineSelEnd = lineSelEnd, lineSelStart
+	}
+	start := max(visibleStart, lineSelStart) - visibleStart
+	end := min(visibleEnd, lineSelEnd) - visibleStart
+	if end <= start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
 func (m model) logsViewportLines() int {
 	return max(1, m.shellPaneHeight()-6)
 }
@@ -1635,6 +1806,95 @@ func (m *model) clampLogXOffset() {
 	}
 }
 
+func (m model) logPanelContentRect() (x, y, width, height int) {
+	appLeft := 2
+	appTop := 1
+	headerLines := 2
+	contentTop := appTop + headerLines
+	panelX := appLeft
+	if !m.logsFullscreen {
+		panelX += max(60, m.width*2/3)
+	}
+	panelY := contentTop
+	contentX := panelX + 2
+	contentY := panelY + 5
+	return contentX, contentY, m.logsContentWidth(), m.logsViewportLines()
+}
+
+func (m model) mouseToLogPosition(mouseX, mouseY int) (lineIndex, col int, ok bool) {
+	x, y, width, height := m.logPanelContentRect()
+	if mouseX < x || mouseY < y || mouseX >= x+width || mouseY >= y+height {
+		return 0, 0, false
+	}
+	lineIndex = m.logCursor + (mouseY - y)
+	col = m.logXOffset + (mouseX - x)
+	lines := m.filteredLogLines()
+	if lineIndex < 0 || lineIndex >= len(lines) {
+		return 0, 0, false
+	}
+	line := strings.ReplaceAll(lines[lineIndex], "\t", "    ")
+	maxCol := runeWidth(line)
+	if col > maxCol {
+		col = maxCol
+	}
+	if col < 0 {
+		col = 0
+	}
+	return lineIndex, col, true
+}
+
+func writeClipboardText(text string) error {
+	if text == "" {
+		return errors.New("nothing selected")
+	}
+	if err := clipboard.WriteAll(text); err == nil {
+		return nil
+	}
+	commands := [][]string{}
+	if isWSL() {
+		commands = append(commands, []string{"clip.exe"})
+	}
+	commands = append(commands,
+		[]string{"pbcopy"},
+		[]string{"wl-copy"},
+		[]string{"xclip", "-selection", "clipboard"},
+		[]string{"xsel", "--clipboard", "--input"},
+	)
+	var lastErr error
+	for _, c := range commands {
+		path, err := exec.LookPath(c[0])
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		cmd := exec.Command(path, c[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("clipboard unavailable")
+}
+
+func isWSL() bool {
+	if os.Getenv("WSL_DISTRO_NAME") != "" || os.Getenv("WSL_INTEROP") != "" {
+		return true
+	}
+	b, err := os.ReadFile("/proc/version")
+	if err == nil {
+		lower := strings.ToLower(string(b))
+		if strings.Contains(lower, "microsoft") || strings.Contains(lower, "wsl") {
+			return true
+		}
+	}
+	return false
+}
+
 func highlightLogLine(line, query string) string {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -1674,11 +1934,37 @@ func colorLogLine(raw, rendered string) string {
 	}
 }
 
-func renderLogLine(line, query string, xOffset, width int) string {
-	raw := strings.ReplaceAll(line, "\t", "    ")
-	raw = sliceRunes(raw, xOffset, width)
-	rendered := highlightLogLine(raw, query)
-	return colorLogLine(raw, rendered)
+func renderLogLine(line, query string, xOffset, width, lineIndex int, m model) string {
+	rawLine := strings.ReplaceAll(line, "\t", "    ")
+	visible := sliceRunes(rawLine, xOffset, width)
+	visibleStart := xOffset
+	visibleEnd := xOffset + runeWidth(visible)
+	query = strings.TrimSpace(query)
+	queryLower := strings.ToLower(query)
+	visibleRunes := []rune(visible)
+	queryStart, queryEnd := -1, -1
+	if query != "" {
+		lowerVisible := strings.ToLower(visible)
+		if idx := strings.Index(lowerVisible, queryLower); idx >= 0 {
+			queryStart = runeWidth(visible[:idx])
+			queryEnd = queryStart + runeWidth(query)
+		}
+	}
+	selStart, selEnd, hasSel := m.logLineSelectedRange(lineIndex, visibleStart, visibleEnd)
+	var b strings.Builder
+	for i, r := range visibleRunes {
+		piece := string(r)
+		switch {
+		case hasSel && i >= selStart && i < selEnd:
+			piece = logSelectionStyle.Render(piece)
+		case queryStart >= 0 && i >= queryStart && i < queryEnd:
+			piece = matchStyle.Render(piece)
+		default:
+			piece = colorLogLine(rawLine, piece)
+		}
+		b.WriteString(piece)
+	}
+	return b.String()
 }
 
 func (m *model) clampCursor() {
@@ -2089,9 +2375,9 @@ func (m model) renderSidePanel() string {
 			start = 0
 		}
 		end := min(len(logLines), start+maxLines)
-		status := "focused • j/k or mouse wheel scroll • h/l horiz • ctrl+u/d page • g/G top/bottom • / search • n/N next/prev • z fullscreen • f follow • enter/esc back"
+		status := "focused • j/k or mouse wheel scroll • h/l horiz • drag select • y copy • ctrl+u/d page • g/G top/bottom • / search • n/N next/prev • z fullscreen • f follow • enter/esc back"
 		if m.followLogs {
-			status = "focused • following latest logs • j/k or mouse wheel scroll • h/l horiz • ctrl+u/d page • / search • z fullscreen • f follow • enter/esc back"
+			status = "focused • following latest logs • j/k or mouse wheel scroll • h/l horiz • drag select • y copy • ctrl+u/d page • / search • z fullscreen • f follow • enter/esc back"
 		}
 		rangeLabel := "rows 0/0"
 		if len(logLines) > 0 {
@@ -2109,8 +2395,8 @@ func (m model) renderSidePanel() string {
 			mutedStyle.Render(fmt.Sprintf("matches: %d/%d • %s • %s", len(logLines), len(allLines), rangeLabel, colLabel)),
 		}
 		contentWidth := m.logsContentWidth()
-		for _, line := range logLines[start:end] {
-			lines = append(lines, renderLogLine(line, query, m.logXOffset, contentWidth))
+		for i, line := range logLines[start:end] {
+			lines = append(lines, renderLogLine(line, query, m.logXOffset, contentWidth, start+i, m))
 		}
 		if len(logLines) == 0 {
 			if query != "" {
@@ -2191,7 +2477,7 @@ func (m model) shellTerminalRows() int {
 func (m model) renderFooter() string {
 	keys := "j/k move • / search • v containers/volumes • tab running/all • space mark • a mark visible • x start all • s stop running • S save snippet • p snippet browser • : command • ? help • r refresh • q quit"
 	if m.mode == viewLogs {
-		keys = "logs: j/k scroll • h/l horiz • mouse wheel scroll • ctrl+u/d page • g/G top/bottom • / search • n/N next/prev • z fullscreen • f follow latest • enter/esc back"
+		keys = "logs: j/k scroll • h/l horiz • mouse wheel scroll • drag select • y copy • c clear selection • ctrl+u/d page • g/G top/bottom • / search • n/N next/prev • z fullscreen • f follow latest • enter/esc back"
 	}
 	status := m.status
 	if strings.TrimSpace(m.lastOutput) != "" {

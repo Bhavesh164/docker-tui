@@ -202,6 +202,9 @@ Inside logs view:
 - `j/k` or arrow keys: scroll logs vertically
 - `h/l` or left/right keys: scroll logs horizontally
 - mouse wheel: scroll logs vertically
+- drag with mouse in logs pane: select log text
+- `y`: copy selected log text to clipboard
+- `c`: clear selected log text
 - `ctrl+u` / `ctrl+d`: page up / page down
 - `g` / `G`: jump to top / bottom
 - `/`: search logs
@@ -211,6 +214,7 @@ Inside logs view:
 - `esc`: leave search, or leave logs if search is not active
 - `f`: toggle follow mode for latest logs
 - log levels like `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` are colorized
+- selected log text can be copied on macOS, Linux, and WSL
 - `enter` or `esc`: return from logs view
 
 ## In-TUI shell
