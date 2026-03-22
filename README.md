@@ -180,8 +180,9 @@ p
 - `a`: mark/unmark all visible snippets
 - `x`: run `docker start` for selected snippets, or current snippet if none selected
 - `s`: run `docker stop` for selected snippets, or current snippet if none selected
-- `d`: delete selected snippets, or current snippet if none selected
-- `D`: delete all snippets
+- `d`: delete selected snippets, or current snippet if none selected, with confirmation
+- `D`: delete all snippets, with confirmation
+- after `d` or `D`: `tab` or `←/→` switches Yes/No, `enter` confirms selected option, `esc` cancels
 
 ## Logs
 

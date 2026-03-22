@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 )
 
@@ -511,58 +512,62 @@ func (t *terminalBuffer) viewLines() []string {
 }
 
 type model struct {
-	width           int
-	height          int
-	ready           bool
-	dockerChecked   bool
-	dockerOK        bool
-	dockerErr       string
-	focus           focusArea
-	mode            viewMode
-	resource        resourceMode
-	filter          filterMode
-	containers      []Container
-	filtered        []Container
-	volumes         []Volume
-	filteredVols    []Volume
-	cursor          int
-	search          textinput.Model
-	logSearch       textinput.Model
-	cmdInput        textinput.Model
-	snippetInput    textinput.Model
-	snippetSearch   textinput.Model
-	shellInput      textinput.Model
-	commandMode     bool
-	snippetMode     bool
-	snippetRun      bool
-	snippetBrowse   bool
-	showHelp        bool
-	markMode        bool
-	marked          map[string]bool
-	snippets        map[string][]string
-	filteredSnips   []string
-	snippetCursor   int
-	snippetMarked   map[string]bool
-	status          string
-	lastOutput      string
-	logContent      string
-	logCursor       int
-	logXOffset      int
-	logSearchActive bool
-	logsFullscreen  bool
-	logSelecting    bool
-	logSelectionOn  bool
-	logSelStartLine int
-	logSelStartCol  int
-	logSelEndLine   int
-	logSelEndCol    int
-	followLogs      bool
-	activeLogID     string
-	activeLogName   string
-	shellOutput     string
-	shellSession    *shellSession
-	shellTerm       *terminalBuffer
-	suggestionIx    int
+	width                int
+	height               int
+	ready                bool
+	dockerChecked        bool
+	dockerOK             bool
+	dockerErr            string
+	focus                focusArea
+	mode                 viewMode
+	resource             resourceMode
+	filter               filterMode
+	containers           []Container
+	filtered             []Container
+	volumes              []Volume
+	filteredVols         []Volume
+	cursor               int
+	search               textinput.Model
+	logSearch            textinput.Model
+	cmdInput             textinput.Model
+	snippetInput         textinput.Model
+	snippetSearch        textinput.Model
+	shellInput           textinput.Model
+	commandMode          bool
+	snippetMode          bool
+	snippetRun           bool
+	snippetBrowse        bool
+	snippetConfirm       bool
+	snippetConfirmYes    bool
+	snippetDeleteAll     bool
+	showHelp             bool
+	markMode             bool
+	marked               map[string]bool
+	snippets             map[string][]string
+	filteredSnips        []string
+	snippetCursor        int
+	snippetMarked        map[string]bool
+	snippetPendingDelete []string
+	status               string
+	lastOutput           string
+	logContent           string
+	logCursor            int
+	logXOffset           int
+	logSearchActive      bool
+	logsFullscreen       bool
+	logSelecting         bool
+	logSelectionOn       bool
+	logSelStartLine      int
+	logSelStartCol       int
+	logSelEndLine        int
+	logSelEndCol         int
+	followLogs           bool
+	activeLogID          string
+	activeLogName        string
+	shellOutput          string
+	shellSession         *shellSession
+	shellTerm            *terminalBuffer
+	suggestionIx         int
 }
 
 func main() {
@@ -1396,6 +1401,59 @@ func (m model) handleShellMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSnippetBrowser(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.snippetConfirm {
+		switch msg.String() {
+		case "tab", "shift+tab":
+			m.snippetConfirmYes = !m.snippetConfirmYes
+			return m, nil
+		case "left", "h":
+			m.snippetConfirmYes = true
+			return m, nil
+		case "right", "l":
+			m.snippetConfirmYes = false
+			return m, nil
+		case "y", "Y":
+			m.snippetConfirmYes = true
+		case "n", "N":
+			m.snippetConfirmYes = false
+		case "esc":
+			m.snippetConfirm = false
+			m.snippetConfirmYes = true
+			m.snippetDeleteAll = false
+			m.snippetPendingDelete = nil
+			m.status = "snippet delete cancelled"
+			return m, nil
+		case "enter":
+			if !m.snippetConfirmYes {
+				m.snippetConfirm = false
+				m.snippetConfirmYes = true
+				m.snippetDeleteAll = false
+				m.snippetPendingDelete = nil
+				m.status = "snippet delete cancelled"
+				return m, nil
+			}
+		default:
+			return m, nil
+		}
+		if !m.snippetConfirmYes {
+			m.snippetConfirm = false
+			m.snippetConfirmYes = true
+			m.snippetDeleteAll = false
+			m.snippetPendingDelete = nil
+			m.status = "snippet delete cancelled"
+			return m, nil
+		}
+		deleteAll := m.snippetDeleteAll
+		names := append([]string(nil), m.snippetPendingDelete...)
+		m.snippetConfirm = false
+		m.snippetConfirmYes = true
+		m.snippetDeleteAll = false
+		m.snippetPendingDelete = nil
+		if deleteAll {
+			return m, m.deleteSelectedSnippetsCmd(true)
+		}
+		return m, m.deleteSnippetsByNameCmd(names)
+	}
 	if m.focus == focusSearch {
 		switch msg.String() {
 		case "esc":
@@ -1454,9 +1512,33 @@ func (m model) handleSnippetBrowser(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		return m, m.runSnippetActionCmd("stop")
 	case "d":
-		return m, m.deleteSelectedSnippetsCmd(false)
+		names := m.selectedSnippetNames()
+		if len(names) == 0 {
+			if current, ok := m.currentSnippetName(); ok {
+				names = []string{current}
+			}
+		}
+		if len(names) == 0 {
+			m.status = "no snippets selected"
+			return m, nil
+		}
+		m.snippetConfirm = true
+		m.snippetConfirmYes = true
+		m.snippetDeleteAll = false
+		m.snippetPendingDelete = append([]string(nil), names...)
+		m.status = fmt.Sprintf("confirm delete %d snippet(s)", len(names))
+		return m, nil
 	case "D":
-		return m, m.deleteSelectedSnippetsCmd(true)
+		if len(m.snippets) == 0 {
+			m.status = "no snippets to delete"
+			return m, nil
+		}
+		m.snippetConfirm = true
+		m.snippetConfirmYes = true
+		m.snippetDeleteAll = true
+		m.snippetPendingDelete = nil
+		m.status = "confirm delete all snippets"
+		return m, nil
 	}
 	return m, nil
 }
@@ -2104,6 +2186,10 @@ func (m *model) deleteSelectedSnippetsCmd(deleteAll bool) tea.Cmd {
 			names = []string{current}
 		}
 	}
+	return m.deleteSnippetsByNameCmd(names)
+}
+
+func (m *model) deleteSnippetsByNameCmd(names []string) tea.Cmd {
 	if len(names) == 0 {
 		m.status = "no snippets selected"
 		return nil
@@ -2265,7 +2351,11 @@ func (m model) View() string {
 	if m.showHelp {
 		parts = append(parts, m.renderHelp())
 	}
-	return appStyle.Render(strings.Join(parts, "\n"))
+	view := appStyle.Render(strings.Join(parts, "\n"))
+	if m.snippetConfirm {
+		view = m.overlayCentered(view, m.renderSnippetConfirm())
+	}
+	return view
 }
 
 func (m model) renderHeader() string {
@@ -2307,53 +2397,285 @@ func (m model) renderMainPanel() string {
 	return m.renderContainers()
 }
 
+type containerTableWidths struct {
+	sel    int
+	id     int
+	name   int
+	state  int
+	image  int
+	status int
+}
+
+type volumeTableWidths struct {
+	name       int
+	driver     int
+	scope      int
+	mountpoint int
+}
+
+func wrapToWidth(text string, width int) []string {
+	text = strings.ReplaceAll(text, "\t", "    ")
+	text = strings.ReplaceAll(text, "\r", "")
+	if width <= 0 {
+		return []string{""}
+	}
+	parts := strings.Split(text, "\n")
+	out := []string{}
+	for _, part := range parts {
+		r := []rune(part)
+		if len(r) == 0 {
+			out = append(out, "")
+			continue
+		}
+		for len(r) > width {
+			out = append(out, string(r[:width]))
+			r = r[width:]
+		}
+		out = append(out, string(r))
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
+}
+
+func padCell(text string, width int) string {
+	return lipgloss.NewStyle().Width(width).Render(text)
+}
+
+func fitFlexWidths(total int, mins []int, weights []int) []int {
+	out := append([]int(nil), mins...)
+	minTotal := 0
+	for _, m := range mins {
+		minTotal += m
+	}
+	if total <= minTotal {
+		return out
+	}
+	extra := total - minTotal
+	weightTotal := 0
+	for _, w := range weights {
+		weightTotal += w
+	}
+	if weightTotal == 0 {
+		weightTotal = len(weights)
+		for i := range weights {
+			weights[i] = 1
+		}
+	}
+	used := 0
+	for i := range out {
+		add := extra * weights[i] / weightTotal
+		out[i] += add
+		used += add
+	}
+	for i := 0; used < extra; i = (i + 1) % len(out) {
+		out[i]++
+		used++
+	}
+	return out
+}
+
+func containerWidths(totalWidth int) containerTableWidths {
+	gaps := 5
+	base := []int{3, 10, 10, 8, 12, 12}
+	weights := []int{0, 0, 30, 10, 30, 30}
+	available := max(30, totalWidth-gaps)
+	vals := fitFlexWidths(available, base, weights)
+	return containerTableWidths{sel: vals[0], id: vals[1], name: vals[2], state: vals[3], image: vals[4], status: vals[5]}
+}
+
+func volumeWidths(totalWidth int) volumeTableWidths {
+	gaps := 3
+	base := []int{10, 8, 8, 12}
+	weights := []int{25, 15, 15, 45}
+	available := max(20, totalWidth-gaps)
+	vals := fitFlexWidths(available, base, weights)
+	return volumeTableWidths{name: vals[0], driver: vals[1], scope: vals[2], mountpoint: vals[3]}
+}
+
+func blocksWindow(blocks [][]string, cursor, maxLines int) []string {
+	if len(blocks) == 0 || maxLines <= 0 {
+		return nil
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(blocks) {
+		cursor = len(blocks) - 1
+	}
+	totalLines := 0
+	cursorStart := 0
+	for i, block := range blocks {
+		if i < cursor {
+			cursorStart += len(block)
+		}
+		totalLines += len(block)
+	}
+	cursorHeight := len(blocks[cursor])
+	center := cursorStart + cursorHeight/2
+	startLine := center - maxLines/2
+	if startLine < 0 {
+		startLine = 0
+	}
+	if totalLines > maxLines && startLine > totalLines-maxLines {
+		startLine = totalLines - maxLines
+	}
+	endLine := startLine + maxLines
+	out := []string{}
+	linePos := 0
+	for _, block := range blocks {
+		blockEnd := linePos + len(block)
+		if blockEnd <= startLine {
+			linePos = blockEnd
+			continue
+		}
+		if linePos >= endLine {
+			break
+		}
+		from := max(0, startLine-linePos)
+		to := min(len(block), endLine-linePos)
+		out = append(out, block[from:to]...)
+		linePos = blockEnd
+	}
+	return out
+}
+
+func (m model) renderContainerBlock(c Container, widths containerTableWidths, contentWidth int, isSelected bool) []string {
+	mark := "[ ]"
+	if m.marked[c.ID] {
+		mark = "[x]"
+	}
+	stateLines := wrapToWidth(c.State, widths.state)
+	if !isSelected {
+		for i := range stateLines {
+			if c.State == "running" {
+				stateLines[i] = runningStyle.Render(stateLines[i])
+			} else {
+				stateLines[i] = stoppedStyle.Render(stateLines[i])
+			}
+		}
+	}
+	cols := [][]string{
+		wrapToWidth(mark, widths.sel),
+		wrapToWidth(c.ID, widths.id),
+		wrapToWidth(c.Names, widths.name),
+		stateLines,
+		wrapToWidth(c.Image, widths.image),
+		wrapToWidth(c.Status, widths.status),
+	}
+	maxH := 1
+	for _, col := range cols {
+		if len(col) > maxH {
+			maxH = len(col)
+		}
+	}
+	out := make([]string, 0, maxH)
+	for row := 0; row < maxH; row++ {
+		parts := []string{
+			padCell(lineAt(cols[0], row), widths.sel),
+			padCell(lineAt(cols[1], row), widths.id),
+			padCell(lineAt(cols[2], row), widths.name),
+			padCell(lineAt(cols[3], row), widths.state),
+			padCell(lineAt(cols[4], row), widths.image),
+			padCell(lineAt(cols[5], row), widths.status),
+		}
+		line := strings.Join(parts, " ")
+		if isSelected {
+			line = selectedStyle.Width(contentWidth).Render(line)
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func (m model) renderVolumeBlock(v Volume, widths volumeTableWidths, contentWidth int, isSelected bool) []string {
+	cols := [][]string{
+		wrapToWidth(v.Name, widths.name),
+		wrapToWidth(v.Driver, widths.driver),
+		wrapToWidth(v.Scope, widths.scope),
+		wrapToWidth(v.Mountpoint, widths.mountpoint),
+	}
+	maxH := 1
+	for _, col := range cols {
+		if len(col) > maxH {
+			maxH = len(col)
+		}
+	}
+	out := make([]string, 0, maxH)
+	for row := 0; row < maxH; row++ {
+		line := strings.Join([]string{
+			padCell(lineAt(cols[0], row), widths.name),
+			padCell(lineAt(cols[1], row), widths.driver),
+			padCell(lineAt(cols[2], row), widths.scope),
+			padCell(lineAt(cols[3], row), widths.mountpoint),
+		}, " ")
+		if isSelected {
+			line = selectedStyle.Width(contentWidth).Render(line)
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func lineAt(lines []string, idx int) string {
+	if idx < 0 || idx >= len(lines) {
+		return ""
+	}
+	return lines[idx]
+}
+
 func (m model) renderContainers() string {
 	width := max(60, m.width*2/3)
 	height := max(12, m.height-12)
+	contentWidth := width - 4
+	widths := containerWidths(contentWidth)
 	lines := []string{titleStyle.Render("Containers")}
 	lines = append(lines, mutedStyle.Render("mark with <space>, all-visible with a, start all with x, stop running with s • enter opens in-TUI shell • l shows logs • [x] means selected • press v for volumes"))
-	lines = append(lines, fmt.Sprintf("%-4s %-12s %-20s %-10s %-24s %s", "SEL", "ID", "NAME", "STATE", "IMAGE", "STATUS"))
-	for i, c := range m.visibleRows(height - 4) {
-		mark := "[ ]"
-		if m.marked[c.ID] {
-			mark = "[x]"
-		}
-		state := c.State
-		if c.State == "running" {
-			state = runningStyle.Render(c.State)
-		} else {
-			state = stoppedStyle.Render(c.State)
-		}
-		row := fmt.Sprintf("%-4s %-12s %-20s %-18s %-24s %s", mark, trim(c.ID, 12), trim(c.Names, 20), state, trim(c.Image, 24), trim(c.Status, 28))
-		actualIndex := m.rowIndexFromVisible(i, height-4)
-		if actualIndex == m.cursor && (m.mode == viewMain || m.mode == viewShell || m.mode == viewLogs) {
-			row = selectedStyle.Width(width - 4).Render(row)
-		}
-		lines = append(lines, row)
-	}
+	lines = append(lines, strings.Join([]string{
+		padCell("SEL", widths.sel),
+		padCell("ID", widths.id),
+		padCell("NAME", widths.name),
+		padCell("STATE", widths.state),
+		padCell("IMAGE", widths.image),
+		padCell("STATUS", widths.status),
+	}, " "))
 	if len(m.filtered) == 0 {
 		lines = append(lines, mutedStyle.Render("no containers match current filter"))
+		return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 	}
+	blocks := make([][]string, 0, len(m.filtered))
+	for i, c := range m.filtered {
+		isSelected := i == m.cursor && (m.mode == viewMain || m.mode == viewShell || m.mode == viewLogs)
+		blocks = append(blocks, m.renderContainerBlock(c, widths, contentWidth, isSelected))
+	}
+	lines = append(lines, blocksWindow(blocks, m.cursor, height-4)...)
 	return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) renderVolumes() string {
 	width := max(60, m.width*2/3)
 	height := max(12, m.height-12)
+	contentWidth := width - 4
+	widths := volumeWidths(contentWidth)
 	lines := []string{titleStyle.Render("Volumes")}
 	lines = append(lines, mutedStyle.Render("fuzzy search volumes • press v to go back to containers"))
-	lines = append(lines, fmt.Sprintf("%-24s %-12s %-10s %s", "NAME", "DRIVER", "SCOPE", "MOUNTPOINT"))
-	for i, v := range m.visibleVolumeRows(height - 4) {
-		row := fmt.Sprintf("%-24s %-12s %-10s %s", trim(v.Name, 24), trim(v.Driver, 12), trim(v.Scope, 10), trim(v.Mountpoint, 40))
-		actualIndex := m.rowIndexFromVisible(i, height-4)
-		if actualIndex == m.cursor && m.mode == viewMain {
-			row = selectedStyle.Width(width - 4).Render(row)
-		}
-		lines = append(lines, row)
-	}
+	lines = append(lines, strings.Join([]string{
+		padCell("NAME", widths.name),
+		padCell("DRIVER", widths.driver),
+		padCell("SCOPE", widths.scope),
+		padCell("MOUNTPOINT", widths.mountpoint),
+	}, " "))
 	if len(m.filteredVols) == 0 {
 		lines = append(lines, mutedStyle.Render("no volumes match current filter"))
+		return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 	}
+	blocks := make([][]string, 0, len(m.filteredVols))
+	for i, v := range m.filteredVols {
+		isSelected := i == m.cursor && m.mode == viewMain
+		blocks = append(blocks, m.renderVolumeBlock(v, widths, contentWidth, isSelected))
+	}
+	lines = append(lines, blocksWindow(blocks, m.cursor, height-4)...)
 	return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 }
 
@@ -2528,6 +2850,76 @@ func (m model) renderSnippetBrowser() string {
 		}
 	}
 	return sectionStyle.Width(max(80, m.width-6)).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderSnippetConfirm() string {
+	title := "Confirm snippet delete"
+	message := "delete selected snippet(s)?"
+	if m.snippetDeleteAll {
+		message = "Delete ALL snippets?"
+	} else if len(m.snippetPendingDelete) > 0 {
+		message = fmt.Sprintf("Delete %d snippet(s)?", len(m.snippetPendingDelete))
+	}
+	preview := strings.Join(m.snippetPendingDelete, ", ")
+	if m.snippetDeleteAll {
+		preview = fmt.Sprintf("all snippets (%d)", len(m.snippets))
+	}
+	buttonBase := lipgloss.NewStyle().Padding(0, 1).Border(lipgloss.RoundedBorder())
+	buttonYes := buttonBase.Render("Yes")
+	buttonNo := buttonBase.Render("No")
+	if m.snippetConfirmYes {
+		buttonYes = selectedStyle.Padding(0, 1).Border(lipgloss.RoundedBorder()).Render("Yes")
+		buttonNo = mutedStyle.Render(buttonNo)
+	} else {
+		buttonYes = mutedStyle.Render(buttonYes)
+		buttonNo = selectedStyle.Padding(0, 1).Border(lipgloss.RoundedBorder()).Render("No")
+	}
+	lines := []string{
+		titleStyle.Render(title),
+		errorStyle.Render(message),
+		trim(preview, max(20, m.width-28)),
+		"",
+		lipgloss.JoinHorizontal(lipgloss.Center, buttonYes, "  ", buttonNo),
+		mutedStyle.Render("tab/←/→ switch • enter confirm selected option • esc cancel"),
+	}
+	return activeSectionStyle.Width(min(72, max(46, m.width-12))).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) overlayCentered(base, overlay string) string {
+	baseLines := strings.Split(base, "\n")
+	baseWidth := lipgloss.Width(base)
+	baseHeight := len(baseLines)
+	overlayLines := strings.Split(overlay, "\n")
+	overlayWidth := lipgloss.Width(overlay)
+	overlayHeight := len(overlayLines)
+	if baseWidth == 0 {
+		baseWidth = m.width
+	}
+	if baseHeight == 0 {
+		baseHeight = m.height
+	}
+	x := max(0, (baseWidth-overlayWidth)/2)
+	y := max(0, (baseHeight-overlayHeight)/2)
+	for len(baseLines) < baseHeight {
+		baseLines = append(baseLines, "")
+	}
+	for i, line := range baseLines {
+		baseLines[i] = lipgloss.NewStyle().Width(baseWidth).Render(line)
+	}
+	for i, oLine := range overlayLines {
+		idx := y + i
+		if idx < 0 || idx >= len(baseLines) {
+			continue
+		}
+		left := ansi.Cut(baseLines[idx], 0, x)
+		rightStart := x + lipgloss.Width(oLine)
+		right := ""
+		if rightStart < baseWidth {
+			right = ansi.Cut(baseLines[idx], rightStart, baseWidth)
+		}
+		baseLines[idx] = left + oLine + right
+	}
+	return strings.Join(baseLines, "\n")
 }
 
 func (m model) renderHelp() string {
