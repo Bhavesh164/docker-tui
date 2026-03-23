@@ -93,13 +93,19 @@ make run
 Useful Make targets:
 
 ```bash
-make build   # build local binary
-make run     # build and run
-make tidy    # tidy go modules
-make test    # run tests
-make clean   # remove local and release binaries
-make release # build release binaries in dist/
+make build               # build local binary at ./docker-tui
+make run                 # build and run
+make tidy                # tidy go modules
+make test                # run tests
+make clean               # remove local and release binaries
+make release             # build all release binaries in dist/
+make release-linux-amd64 # rebuild dist/docker-tui_linux_amd64
+make release-linux-arm64 # rebuild dist/docker-tui_linux_arm64
 ```
+
+> `make build` only refreshes `./docker-tui`. It does **not** update `dist/`.
+> If you are testing on Linux or WSL, rebuild the release binary with
+> `make release-linux-amd64` (or `make release`) before running `dist/docker-tui_linux_amd64`.
 
 ## Release binaries
 
