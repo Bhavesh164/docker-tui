@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -19,6 +20,20 @@ func (m *model) clampCursor() {
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
+	}
+}
+
+func (m *model) clampVolumeCursor() {
+	count := len(m.volumeBrowser.entries)
+	if count == 0 {
+		m.volumeBrowser.cursor = 0
+		return
+	}
+	if m.volumeBrowser.cursor >= count {
+		m.volumeBrowser.cursor = count - 1
+	}
+	if m.volumeBrowser.cursor < 0 {
+		m.volumeBrowser.cursor = 0
 	}
 }
 
@@ -475,4 +490,139 @@ func (m model) commandSuggestions() []string {
 		out = out[:8]
 	}
 	return out
+}
+
+func (m model) handleEnterVolumes() (model, tea.Cmd) {
+	v, ok := m.currentVolume()
+	if !ok {
+		return m, nil
+	}
+	m.mode = viewVolume
+	m.volumeBrowser = volumeBrowser{
+		active:  true,
+		path:    v.Name + ":/",
+		cursor:  0,
+		loading: true,
+	}
+	m.volumeBrowser.entries = []volumeEntry{}
+	return m, loadVolumeDirCmd(v.Name + ":/")
+}
+
+func (m model) handleVolumeBrowserEnter() (model, tea.Cmd) {
+	if len(m.volumeBrowser.entries) == 0 {
+		return m, nil
+	}
+	if m.volumeBrowser.cursor < 0 || m.volumeBrowser.cursor >= len(m.volumeBrowser.entries) {
+		return m, nil
+	}
+	entry := m.volumeBrowser.entries[m.volumeBrowser.cursor]
+	if entry.IsDir {
+		m.volumeBrowser.cursor = 0
+		m.volumeBrowser.loading = true
+		m.volumeBrowser.path = entry.Path
+		m.volumeBrowser.entries = []volumeEntry{}
+		m.volumeBrowser.selectedFile = ""
+		m.volumeBrowser.fileContent = ""
+		return m, loadVolumeDirCmd(entry.Path)
+	}
+	m.volumeBrowser.selectedFile = entry.Path
+	m.volumeBrowser.fileContent = ""
+	m.volumeBrowser.fileLoading = true
+	m.status = fmt.Sprintf("loading preview: %s", entry.Path)
+	return m, loadVolumeFileContentCmd(entry.Path)
+}
+
+func (m model) currentVolumeBrowserEntry() (volumeEntry, bool) {
+	if m.volumeBrowser.cursor < 0 || m.volumeBrowser.cursor >= len(m.volumeBrowser.entries) {
+		return volumeEntry{}, false
+	}
+	return m.volumeBrowser.entries[m.volumeBrowser.cursor], true
+}
+
+func (m model) volumeBrowserGoParent() (model, tea.Cmd) {
+	currentPath := m.volumeBrowser.path
+	if currentPath == "" {
+		return m, nil
+	}
+	parts := strings.SplitN(currentPath, ":", 2)
+	if len(parts) != 2 {
+		return m, nil
+	}
+	vName, subPath := parts[0], parts[1]
+	if subPath == "" || subPath == "/" {
+		return m, nil
+	}
+	parentSubPath := filepath.Dir(subPath)
+	if parentSubPath == "." || parentSubPath == "/" {
+		parentSubPath = "/"
+	}
+	parent := vName + ":" + parentSubPath
+	m.volumeBrowser.cursor = 0
+	m.volumeBrowser.loading = true
+	m.volumeBrowser.path = parent
+	m.volumeBrowser.entries = []volumeEntry{}
+	m.volumeBrowser.selectedFile = ""
+	m.volumeBrowser.fileContent = ""
+	return m, loadVolumeDirCmd(parent)
+}
+
+func (m model) volumeBrowserExit() model {
+	m.mode = viewMain
+	m.volumeBrowser = volumeBrowser{}
+	return m
+}
+
+func (m model) handleVolumeBrowserKey(msg tea.KeyMsg) (model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		m = m.volumeBrowserExit()
+		m.status = "exited volume browser"
+		return m, nil
+	case "enter":
+		return m.handleVolumeBrowserEnter()
+	case "backspace":
+		return m.volumeBrowserGoParent()
+	case "j", "down":
+		if m.volumeBrowser.cursor < len(m.volumeBrowser.entries)-1 {
+			m.volumeBrowser.cursor++
+		}
+		return m, nil
+	case "k", "up":
+		if m.volumeBrowser.cursor > 0 {
+			m.volumeBrowser.cursor--
+		}
+		return m, nil
+	case "g":
+		m.volumeBrowser.cursor = 0
+		return m, nil
+	case "G":
+		if len(m.volumeBrowser.entries) > 0 {
+			m.volumeBrowser.cursor = len(m.volumeBrowser.entries) - 1
+		}
+		return m, nil
+	case "r":
+		m.volumeBrowser.cursor = 0
+		m.volumeBrowser.loading = true
+		m.volumeBrowser.entries = []volumeEntry{}
+		return m, loadVolumeDirCmd(m.volumeBrowser.path)
+	case "z":
+		if entry, ok := m.currentVolumeBrowserEntry(); ok && !entry.IsDir {
+			m.mode = viewLogs
+			m.activeLogID = "FILE"
+			m.activeLogName = "File: " + entry.Name
+			m.logContent = "loading contents..."
+			m.followLogs = false
+			m.logCursor = 0
+			m.logXOffset = 0
+			m.logsFullscreen = true
+			m.clearLogSelection()
+			m.logSearchActive = false
+			m.logSearch.SetValue("")
+			m.logSearch.Blur()
+			m.status = fmt.Sprintf("loading full file: %s", entry.Name)
+			return m, loadFullVolumeFileContentCmd(entry.Path)
+		}
+		return m, nil
+	}
+	return m, nil
 }

@@ -29,6 +29,7 @@ const (
 	viewMain viewMode = iota
 	viewLogs
 	viewShell
+	viewVolume
 )
 
 const (
@@ -104,6 +105,10 @@ type containersMsg struct {
 	err   error
 }
 
+type containerStatsMsg struct {
+	stats map[string]string
+}
+
 type volumesMsg struct {
 	items []Volume
 	err   error
@@ -160,6 +165,12 @@ type volumeDetailsMsg struct {
 	err          error
 }
 
+type volumeBrowseMsg struct {
+	path    string
+	entries []volumeEntry
+	err     error
+}
+
 type confirmDialog struct {
 	active  bool
 	yes     bool
@@ -179,6 +190,24 @@ type volumeDetailsState struct {
 	loading      bool
 	loaded       bool
 	err          string
+}
+
+type volumeBrowser struct {
+	active       bool
+	path         string
+	entries      []volumeEntry
+	cursor       int
+	loading      bool
+	err          string
+	selectedFile string
+	fileContent  string
+	fileLoading  bool
+}
+
+type volumeFileContentMsg struct {
+	path    string
+	content string
+	err     error
 }
 
 type tickMsg time.Time
@@ -218,6 +247,7 @@ type model struct {
 	snippetMarked   map[string]bool
 	confirm         confirmDialog
 	volumeDetails   volumeDetailsState
+	volumeBrowser   volumeBrowser
 	status          string
 	lastOutput      string
 	logContent      string

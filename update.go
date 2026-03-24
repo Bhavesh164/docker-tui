@@ -49,6 +49,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyFilter()
 		m.clampCursor()
 		m.status = fmt.Sprintf("loaded %d containers", len(m.containers))
+		return m, fetchContainerStatsCmd(m.containers)
+	case containerStatsMsg:
+		for i, c := range m.containers {
+			if mem, ok := msg.stats[c.ID]; ok {
+				m.containers[i].Memory = mem
+			} else if mem, ok := msg.stats[c.Names]; ok {
+				m.containers[i].Memory = mem
+			}
+		}
+		m.applyFilter()
 		return m, nil
 	case volumesMsg:
 		if msg.err != nil {
@@ -76,6 +86,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.volumeDetails.err = ""
+		return m, nil
+	case volumeBrowseMsg:
+		m.volumeBrowser.loading = false
+		if msg.err != nil {
+			m.volumeBrowser.err = msg.err.Error()
+			return m, nil
+		}
+		m.volumeBrowser.entries = msg.entries
+		m.volumeBrowser.err = ""
+		m.volumeBrowser.path = msg.path
+		m.clampVolumeCursor()
+		return m, nil
+	case volumeFileContentMsg:
+		if m.volumeBrowser.selectedFile == msg.path {
+			m.volumeBrowser.fileLoading = false
+			if msg.err != nil {
+				m.volumeBrowser.fileContent = msg.err.Error()
+			} else {
+				m.volumeBrowser.fileContent = msg.content
+			}
+		}
 		return m, nil
 	case logsMsg:
 		if msg.err != nil && strings.TrimSpace(msg.content) == "" {
@@ -160,6 +191,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == viewShell {
 			return m.handleShellMode(msg)
 		}
+		if m.mode == viewVolume {
+			return m.handleVolumeBrowserKey(msg)
+		}
 		if !m.dockerOK {
 			switch msg.String() {
 			case "q", "ctrl+c":
@@ -198,7 +232,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logSearch.SetValue("")
 				m.logSearch.Blur()
 				m.clearLogSelection()
-				m.mode = viewMain
+				if m.activeLogID == "FILE" {
+					m.mode = viewVolume
+				} else {
+					m.mode = viewMain
+				}
 				return m, tea.ShowCursor
 			}
 			m.mode = viewMain
@@ -464,12 +502,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logSearch.SetValue("")
 				m.logSearch.Blur()
 				m.clearLogSelection()
-				m.mode = viewMain
+				if m.activeLogID == "FILE" {
+					m.mode = viewVolume
+				} else {
+					m.mode = viewMain
+				}
 				return m, tea.ShowCursor
 			}
+			if m.mode == viewVolume {
+				return m.handleVolumeBrowserEnter()
+			}
 			if m.resource == resourceVolumes {
-				m.volumeDetails = volumeDetailsState{}
-				return m, m.currentVolumeDetailsCmd()
+				return m.handleEnterVolumes()
 			}
 			if c, ok := m.currentContainer(); ok {
 				if c.State != "running" {

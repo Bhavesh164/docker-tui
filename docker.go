@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
-	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,7 +55,6 @@ func refreshContainersCmd() tea.Cmd {
 			}
 		}
 		attachContainerInspect(ctx, items)
-		attachContainerStats(ctx, items)
 		sort.Slice(items, func(i, j int) bool {
 			if items[i].State == items[j].State {
 				return items[i].Names < items[j].Names
@@ -146,40 +147,44 @@ func attachContainerInspect(ctx context.Context, items []Container) {
 	}
 }
 
-func attachContainerStats(ctx context.Context, items []Container) {
-	hasRunning := false
-	for _, item := range items {
-		if item.State == "running" {
-			hasRunning = true
-			break
+func fetchContainerStatsCmd(items []Container) tea.Cmd {
+	return func() tea.Msg {
+		hasRunning := false
+		for _, item := range items {
+			if item.State == "running" {
+				hasRunning = true
+				break
+			}
 		}
-	}
-	if !hasRunning {
-		return
-	}
-	cmd := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", `{"ID":"{{.ID}}","Name":"{{.Name}}","MemUsage":"{{.MemUsage}}"}`)
-	out, err := cmd.Output()
-	if err != nil {
-		return
-	}
-	type statLine struct {
-		ID       string `json:"ID"`
-		Name     string `json:"Name"`
-		MemUsage string `json:"MemUsage"`
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+		msg := containerStatsMsg{stats: map[string]string{}}
+		if !hasRunning {
+			return msg
 		}
-		var stat statLine
-		if err := json.Unmarshal([]byte(line), &stat); err != nil {
-			continue
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", `{"ID":"{{.ID}}","Name":"{{.Name}}","MemUsage":"{{.MemUsage}}"}`)
+		out, err := cmd.Output()
+		if err != nil {
+			return msg
 		}
-		idx := indexOfContainerByIDOrName(items, stat.ID, stat.Name)
-		if idx >= 0 {
-			items[idx].Memory = stat.MemUsage
+		type statLine struct {
+			ID       string `json:"ID"`
+			Name     string `json:"Name"`
+			MemUsage string `json:"MemUsage"`
 		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var stat statLine
+			if err := json.Unmarshal([]byte(line), &stat); err != nil {
+				continue
+			}
+			msg.stats[stat.ID] = stat.MemUsage
+			msg.stats[stat.Name] = stat.MemUsage
+		}
+		return msg
 	}
 }
 
@@ -238,49 +243,109 @@ func formatInspectPorts(ports map[string][]containerPortBinding) string {
 	return strings.Join(entries, ", ")
 }
 
+func fetchVolumeEntries(volumeName, subPath string) ([]volumeEntry, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if !strings.HasPrefix(subPath, "/") {
+		subPath = "/" + subPath
+	}
+	
+	cmdStr := fmt.Sprintf("cd \"/vol%s\" 2>/dev/null && find . -maxdepth 1 -mindepth 1 -exec stat -c \"%%F|%%A|%%s|%%n\" {} +", subPath)
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-v", volumeName+":/vol:ro", "alpine", "sh", "-c", cmdStr)
+	out, err := cmd.CombinedOutput()
+	
+	if err != nil {
+		outStr := strings.TrimSpace(string(out))
+		if strings.Contains(outStr, "No such file or directory") || strings.Contains(outStr, "can't cd to") {
+			return []volumeEntry{}, nil
+		}
+		return nil, fmt.Errorf("failed to list volume contents: %s", outStr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var entries []volumeEntry
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		
+		fType, fMode, fSizeStr, fName := parts[0], parts[1], parts[2], parts[3]
+		fName = strings.TrimPrefix(fName, "./")
+		
+		isDir := strings.Contains(fType, "directory")
+		fTypeClean := "file"
+		if isDir {
+			fTypeClean = "dir"
+		} else if strings.Contains(fType, "link") {
+			fTypeClean = "link"
+		}
+		
+		sizeInt, _ := strconv.ParseInt(fSizeStr, 10, 64)
+		
+		item := volumeEntry{
+			Name:  fName,
+			Path:  volumeName + ":" + filepath.Join(subPath, fName),
+			IsDir: isDir,
+			Type:  fTypeClean,
+			Size:  "—",
+			Mode:  fMode,
+		}
+		
+		if !isDir {
+			item.Size = humanSize(sizeInt)
+		}
+		
+		entries = append(entries, item)
+	}
+	
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir == entries[j].IsDir {
+			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		}
+		return entries[i].IsDir
+	})
+	
+	return entries, nil
+}
+
 func loadVolumeDetailsCmd(name, mountpoint string) tea.Cmd {
 	return func() tea.Msg {
 		msg := volumeDetailsMsg{name: name, mountpoint: mountpoint}
-		if strings.TrimSpace(mountpoint) == "" {
-			msg.err = errors.New("volume mountpoint is empty")
-			return msg
-		}
-		entries, err := os.ReadDir(mountpoint)
+		entries, err := fetchVolumeEntries(name, "/")
 		if err != nil {
 			msg.err = err
 			return msg
 		}
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].IsDir() == entries[j].IsDir() {
-				return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
-			}
-			return entries[i].IsDir()
-		})
 		msg.totalEntries = len(entries)
 		limit := min(32, len(entries))
-		msg.entries = make([]volumeEntry, 0, limit)
-		for _, entry := range entries[:limit] {
-			item := volumeEntry{
-				Name:  entry.Name(),
-				Path:  mountpoint + string(os.PathSeparator) + entry.Name(),
-				IsDir: entry.IsDir(),
-				Type:  "file",
-				Size:  "—",
-			}
-			if entry.IsDir() {
-				item.Type = "dir"
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				item.Type = "link"
-			}
-			if info, err := entry.Info(); err == nil {
-				item.Mode = info.Mode().String()
-				if !entry.IsDir() {
-					item.Size = humanSize(info.Size())
-				}
-			}
-			msg.entries = append(msg.entries, item)
+		if msg.totalEntries > 0 {
+			msg.entries = entries[:limit]
 		}
+		return msg
+	}
+}
+
+func loadVolumeDirCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		msg := volumeBrowseMsg{path: path}
+		parts := strings.SplitN(path, ":", 2)
+		if len(parts) != 2 {
+			msg.err = errors.New("invalid volume path format")
+			return msg
+		}
+		
+		entries, err := fetchVolumeEntries(parts[0], parts[1])
+		if err != nil {
+			msg.err = err
+			return msg
+		}
+		msg.entries = entries
 		return msg
 	}
 }
@@ -371,5 +436,71 @@ func resizeShellSession(session *shellSession, width, height int) {
 func shellClosedMsgCmd(sessionID int) tea.Cmd {
 	return func() tea.Msg {
 		return shellClosedMsg{sessionID: sessionID}
+	}
+}
+
+func loadVolumeFileContentCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		msg := volumeFileContentMsg{path: path}
+		parts := strings.SplitN(path, ":", 2)
+		if len(parts) != 2 {
+			msg.err = errors.New("invalid volume path format")
+			return msg
+		}
+		
+		volumeName, subPath := parts[0], parts[1]
+		if !strings.HasPrefix(subPath, "/") {
+			subPath = "/" + subPath
+		}
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		
+		cmdStr := fmt.Sprintf("head -c 4000 \"/vol%s\"", subPath)
+		cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-v", volumeName+":/vol:ro", "alpine", "sh", "-c", cmdStr)
+		out, err := cmd.CombinedOutput()
+		
+		if err != nil {
+			msg.err = fmt.Errorf("failed to read file: %s", strings.TrimSpace(string(out)))
+			return msg
+		}
+		
+		content := string(out)
+		if len(content) == 4000 {
+			content += "\n... (truncated)"
+		}
+		msg.content = content
+		return msg
+	}
+}
+
+func loadFullVolumeFileContentCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		parts := strings.SplitN(path, ":", 2)
+		if len(parts) != 2 {
+			return logsMsg{err: errors.New("invalid volume path format")}
+		}
+		
+		volumeName, subPath := parts[0], parts[1]
+		if !strings.HasPrefix(subPath, "/") {
+			subPath = "/" + subPath
+		}
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		cmdStr := fmt.Sprintf("head -c 2000000 \"/vol%s\"", subPath)
+		cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-v", volumeName+":/vol:ro", "alpine", "sh", "-c", cmdStr)
+		out, err := cmd.CombinedOutput()
+		
+		if err != nil {
+			return logsMsg{err: fmt.Errorf("failed to read file: %s", strings.TrimSpace(string(out)))}
+		}
+		
+		content := string(out)
+		if len(content) == 2000000 {
+			content += "\n... (truncated at 2MB)"
+		}
+		return logsMsg{containerID: "FILE", content: content}
 	}
 }

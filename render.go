@@ -31,8 +31,14 @@ func (m model) View() string {
 	}
 
 	header := m.renderHeader()
-	left := m.renderMainPanel()
-	right := m.renderSidePanel()
+	var left, right string
+	if m.mode == viewVolume {
+		left = m.renderVolumeBrowser()
+		right = m.renderVolumeBrowserDetails()
+	} else {
+		left = m.renderMainPanel()
+		right = m.renderSidePanel()
+	}
 	content := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	if m.mode == viewLogs && m.logsFullscreen {
 		content = right
@@ -78,6 +84,9 @@ func (m model) renderHeader() string {
 	}
 	if m.mode == viewShell {
 		modeLabel = "shell"
+	}
+	if m.mode == viewVolume {
+		modeLabel = "volume"
 	}
 	title := titleStyle.Render("Docker TUI")
 	stats := fmt.Sprintf("containers:%d  volumes:%d  shown:%d  selected:%d  filter:%s  view:%s", len(m.containers), len(m.volumes), shown, len(m.selectedIDs()), filter, modeLabel)
@@ -587,6 +596,9 @@ func (m model) renderFooter() string {
 	if m.mode == viewLogs {
 		keys = "logs: j/k scroll • h/l horiz • mouse wheel scroll • drag select • y copy • c clear selection • ctrl+u/d page • g/G top/bottom • / search • n/N next/prev • z fullscreen • f follow latest • enter/esc back"
 	}
+	if m.mode == viewVolume {
+		keys = "volume browser: j/k move • enter into dir • backspace go up • r refresh • esc exit browser"
+	}
 	status := m.status
 	if strings.TrimSpace(m.lastOutput) != "" {
 		status += " | " + trim(strings.ReplaceAll(m.lastOutput, "\n", " | "), max(20, m.width-10))
@@ -777,4 +789,113 @@ func (m model) rowIndexFromVisible(visibleIndex, maxRows int) int {
 		start = count - maxRows
 	}
 	return start + visibleIndex
+}
+
+func (m model) renderVolumeBrowser() string {
+	width := max(60, m.width*2/3)
+	height := max(12, m.height-12)
+	contentWidth := width - 4
+	lines := []string{titleStyle.Render("Volume Browser")}
+	pathDisplay := m.volumeBrowser.path
+	if len(pathDisplay) > contentWidth-10 {
+		pathDisplay = "..." + pathDisplay[len(pathDisplay)-(contentWidth-10):]
+	}
+	lines = append(lines, mutedStyle.Render(pathDisplay))
+	lines = append(lines, strings.Join([]string{
+		padCell("TYPE", 6),
+		padCell("NAME", 30),
+		padCell("SIZE", 10),
+		padCell("MODE", 12),
+	}, " "))
+	if m.volumeBrowser.loading {
+		lines = append(lines, mutedStyle.Render("loading..."))
+		return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+	}
+	if m.volumeBrowser.err != "" {
+		lines = append(lines, errorStyle.Render(m.volumeBrowser.err))
+		return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+	}
+	if len(m.volumeBrowser.entries) == 0 {
+		lines = append(lines, mutedStyle.Render("directory is empty"))
+		return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+	}
+	blocks := make([][]string, 0, len(m.volumeBrowser.entries))
+	for i, entry := range m.volumeBrowser.entries {
+		isSelected := i == m.volumeBrowser.cursor
+		prefix := "[f]"
+		if entry.IsDir {
+			prefix = "[d]"
+		} else if entry.Type == "link" {
+			prefix = "[l]"
+		}
+		cols := [][]string{
+			wrapToWidth(prefix, 6),
+			wrapToWidth(entry.Name, 30),
+			wrapToWidth(entry.Size, 10),
+			wrapToWidth(entry.Mode, 12),
+		}
+		maxH := 1
+		for _, col := range cols {
+			if len(col) > maxH {
+				maxH = len(col)
+			}
+		}
+		block := make([]string, 0, maxH)
+		for row := 0; row < maxH; row++ {
+			line := strings.Join([]string{
+				padCell(lineAt(cols[0], row), 6),
+				padCell(lineAt(cols[1], row), 30),
+				padCell(lineAt(cols[2], row), 10),
+				padCell(lineAt(cols[3], row), 12),
+			}, " ")
+			if isSelected {
+				line = selectedStyle.Width(contentWidth).Render(line)
+			}
+			block = append(block, line)
+		}
+		blocks = append(blocks, block)
+	}
+	lines = append(lines, blocksWindow(blocks, m.volumeBrowser.cursor, height-4)...)
+	return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderVolumeBrowserDetails() string {
+	width := max(36, m.width/3-8)
+	height := max(12, m.height-12)
+	lines := []string{titleStyle.Render("Volume Browser")}
+	lines = append(lines, mutedStyle.Render("j/k move • enter into dir/file • backspace parent • r refresh • esc exit"))
+	if m.volumeBrowser.path != "" {
+		lines = append(lines, "", mutedStyle.Render("path:"), mutedStyle.Render(trim(m.volumeBrowser.path, width-8)))
+	}
+	if entry, ok := m.currentVolumeBrowserEntry(); ok {
+		lines = append(lines, "",
+			fmt.Sprintf("name: %s", entry.Name),
+			fmt.Sprintf("type: %s", entry.Type),
+			fmt.Sprintf("size: %s", entry.Size),
+			fmt.Sprintf("mode: %s", entry.Mode),
+			fmt.Sprintf("path: %s", trim(entry.Path, width-8)),
+		)
+		
+		if m.volumeBrowser.selectedFile == entry.Path {
+			lines = append(lines, "", mutedStyle.Render("preview:"))
+			if m.volumeBrowser.fileLoading {
+				lines = append(lines, mutedStyle.Render("loading..."))
+			} else {
+				contentDisplay := m.volumeBrowser.fileContent
+				if contentDisplay == "" {
+					contentDisplay = "(empty file)"
+				}
+				wrapped := wrapToWidth(contentDisplay, width-4)
+				previewLimit := max(5, height-18)
+				if len(wrapped) > previewLimit {
+					lines = append(lines, wrapped[:previewLimit]...)
+					lines = append(lines, mutedStyle.Render("... (truncated)"))
+				} else {
+					lines = append(lines, wrapped...)
+				}
+			}
+		}
+	}
+	lines = append(lines, "", mutedStyle.Render(fmt.Sprintf("items: %d", len(m.volumeBrowser.entries))))
+	return sectionStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 }
