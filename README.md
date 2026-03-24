@@ -16,7 +16,14 @@ A single-binary Docker terminal UI built with Go + Bubble Tea.
 - Multi-select containers with visible `[x]` markers
 - Start selected containers or all containers
 - Stop selected containers or all running containers
+- Delete selected/current containers with confirmation
+- Show container port mappings and live memory usage for running containers
+- Show volume mountpoints, attached containers, and a contents preview of where data is stored
 - Save selected containers as named snippets
+
+> Docker does not let you change published ports on an existing container in-place.
+> The TUI now shows port mappings clearly and reminds you that port changes require
+> recreating the container with new `-p` / `-P` settings.
 - Snippets store container names and can run:
   - `docker start <name1> <name2> ...`
   - `docker stop <name1> <name2> ...`
@@ -148,9 +155,11 @@ So no separate WSL-only binary is needed.
 - `a`: select/unselect all visible containers
 - `x`: start selected containers, or all containers if none selected
 - `s`: stop selected containers, or all running containers if none selected
+- `d`: delete selected containers, or current container if none selected, with confirmation
 - `S`: save selected containers as a snippet
 - `p`: open snippet browser
-- `Enter`: open interactive PTY shell for selected running container inside the TUI
+- `P`: show a reminder that Docker port mappings on existing containers must be changed by recreating the container
+- `Enter`: open interactive PTY shell for selected running container inside the TUI, or refresh the selected volume preview in volumes view
 - `l`: show logs for selected container
 - `f`: toggle log follow mode
 - `:`: open Docker command palette with autocomplete
