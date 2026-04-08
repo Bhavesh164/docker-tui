@@ -250,9 +250,9 @@ func fetchVolumeEntries(volumeName, subPath string) ([]volumeEntry, error) {
 	if !strings.HasPrefix(subPath, "/") {
 		subPath = "/" + subPath
 	}
-	
-	cmdStr := fmt.Sprintf("cd \"/vol%s\" 2>/dev/null && find . -maxdepth 1 -mindepth 1 -exec stat -c \"%%F|%%A|%%s|%%n\" {} +", subPath)
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-v", volumeName+":/vol:ro", "alpine", "sh", "-c", cmdStr)
+
+	cmdStr := `cd "/vol${1}" 2>/dev/null && find . -maxdepth 1 -mindepth 1 -exec stat -c "%F|%A|%s|%n" {} +`
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-v", volumeName+":/vol:ro", "alpine", "sh", "-c", cmdStr, "sh", subPath)
 	out, err := cmd.CombinedOutput()
 	
 	if err != nil {
