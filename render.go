@@ -62,6 +62,9 @@ func (m model) View() string {
 	if m.confirm.active {
 		view = m.overlayCentered(view, m.renderConfirmDialog())
 	}
+	if m.snippetEditor.active {
+		view = m.overlayCentered(view, m.renderSnippetEditor())
+	}
 	return view
 }
 
@@ -629,7 +632,7 @@ func (m model) renderSnippetBrowser() string {
 	lines := []string{
 		titleStyle.Render("Snippets"),
 		"search: " + m.snippetSearch.View(),
-		mutedStyle.Render("/ search • j/k move • space mark • a mark visible • x start • s stop • d delete selected/current • D delete all • esc close"),
+		mutedStyle.Render("/ search • j/k move • space mark • a mark visible • e edit • x start • s stop • d delete selected/current • D delete all • esc close"),
 	}
 	if len(m.filteredSnips) == 0 {
 		lines = append(lines, mutedStyle.Render("no snippets match"))
@@ -648,6 +651,54 @@ func (m model) renderSnippetBrowser() string {
 		}
 	}
 	return sectionStyle.Width(max(80, m.width-6)).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderSnippetEditor() string {
+	selectedCount := len(m.snippetEditorSelected())
+	lines := []string{
+		titleStyle.Render("Edit snippet"),
+		"name: " + m.snippetEditor.nameInput.View(),
+		mutedStyle.Render(fmt.Sprintf("selected containers: %d", selectedCount)),
+		"",
+	}
+	if len(m.snippetEditor.options) == 0 {
+		lines = append(lines, mutedStyle.Render("no containers available"))
+	} else {
+		maxRows := min(12, len(m.snippetEditor.options))
+		start := 0
+		if len(m.snippetEditor.options) > maxRows {
+			start = m.snippetEditor.cursor - maxRows/2
+			if start < 0 {
+				start = 0
+			}
+			if start > len(m.snippetEditor.options)-maxRows {
+				start = len(m.snippetEditor.options) - maxRows
+			}
+		}
+		end := min(len(m.snippetEditor.options), start+maxRows)
+		for i := start; i < end; i++ {
+			option := m.snippetEditor.options[i]
+			mark := "[ ]"
+			if m.snippetEditor.marked[option.Name] {
+				mark = "[x]"
+			}
+			label := option.Name
+			if !option.Available {
+				label += " (saved, not currently available)"
+			}
+			row := fmt.Sprintf("%-4s %s", mark, trim(label, max(20, m.width-34)))
+			if i == m.snippetEditor.cursor && !m.snippetEditor.nameFocused {
+				row = selectedStyle.Render(row)
+			}
+			lines = append(lines, row)
+		}
+	}
+	hint := "tab switch name/list • space toggle • a toggle all • enter save • esc cancel"
+	if m.snippetEditor.nameFocused {
+		lines[1] = selectedStyle.Render(lines[1])
+	}
+	lines = append(lines, "", mutedStyle.Render(hint))
+	return activeSectionStyle.Width(min(84, max(52, m.width-10))).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) renderConfirmDialog() string {
@@ -729,7 +780,7 @@ func (m model) renderHelp() string {
 		"S                save selected containers as snippet (stores container names)",
 		"p                open snippet browser with fuzzy search",
 		"P                explain why docker port remap needs container recreation",
-		"snippet browser   x=start, s=stop, d=delete selected/current, D=delete all",
+		"snippet browser   e=edit name+containers, x=start, s=stop, d=delete selected/current, D=delete all",
 		"enter            open PTY shell for selected running container / close logs",
 		"enter (volumes)  refresh selected volume mountpoint preview",
 		"l                open logs for selected container",
@@ -875,7 +926,7 @@ func (m model) renderVolumeBrowserDetails() string {
 			fmt.Sprintf("mode: %s", entry.Mode),
 			fmt.Sprintf("path: %s", trim(entry.Path, width-8)),
 		)
-		
+
 		if m.volumeBrowser.selectedFile == entry.Path {
 			lines = append(lines, "", mutedStyle.Render("preview:"))
 			if m.volumeBrowser.fileLoading {

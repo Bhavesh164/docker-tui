@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -189,6 +190,111 @@ func (m *model) openConfirm(title, message, preview string, action confirmAction
 		values:  append([]string(nil), values...),
 		force:   force,
 	}
+}
+
+func (m *model) openSnippetEditor(name string) {
+	saved := append([]string(nil), m.snippets[name]...)
+	seen := map[string]bool{}
+	options := make([]snippetEditorOption, 0, len(m.containers)+len(saved))
+	for _, c := range m.containers {
+		if c.Names == "" || seen[c.Names] {
+			continue
+		}
+		seen[c.Names] = true
+		options = append(options, snippetEditorOption{Name: c.Names, Available: true})
+	}
+	for _, containerName := range saved {
+		if containerName == "" || seen[containerName] {
+			continue
+		}
+		seen[containerName] = true
+		options = append(options, snippetEditorOption{Name: containerName, Available: false})
+	}
+	sort.Slice(options, func(i, j int) bool {
+		if options[i].Available != options[j].Available {
+			return options[i].Available && !options[j].Available
+		}
+		return options[i].Name < options[j].Name
+	})
+	nameInput := textinput.New()
+	nameInput.Placeholder = "snippet name"
+	nameInput.CharLimit = 64
+	nameInput.Width = 30
+	nameInput.SetValue(name)
+	nameInput.Focus()
+	m.snippetEditor = snippetEditorState{
+		active:       true,
+		nameFocused:  true,
+		originalName: name,
+		nameInput:    nameInput,
+		options:      options,
+		cursor:       0,
+		marked:       map[string]bool{},
+	}
+	for _, containerName := range saved {
+		if containerName != "" {
+			m.snippetEditor.marked[containerName] = true
+		}
+	}
+}
+
+func (m *model) closeSnippetEditor(status string) {
+	m.snippetEditor = snippetEditorState{}
+	if status != "" {
+		m.status = status
+	}
+}
+
+func (m *model) snippetEditorSelected() []string {
+	names := make([]string, 0, len(m.snippetEditor.marked))
+	for _, option := range m.snippetEditor.options {
+		if m.snippetEditor.marked[option.Name] {
+			names = append(names, option.Name)
+		}
+	}
+	return names
+}
+
+func (m *model) saveSnippetEditor() tea.Cmd {
+	if !m.snippetEditor.active {
+		return nil
+	}
+	name := strings.TrimSpace(m.snippetEditor.nameInput.Value())
+	if name == "" {
+		m.status = "snippet name is required"
+		return nil
+	}
+	selected := m.snippetEditorSelected()
+	if len(selected) == 0 {
+		m.status = "select at least one container"
+		return nil
+	}
+	original := m.snippetEditor.originalName
+	if original != name {
+		if _, exists := m.snippets[name]; exists {
+			m.status = fmt.Sprintf("snippet %q already exists", name)
+			return nil
+		}
+		delete(m.snippets, original)
+		if m.snippetMarked[original] {
+			delete(m.snippetMarked, original)
+			m.snippetMarked[name] = true
+		}
+	}
+	m.snippets[name] = selected
+	m.applySnippetFilter()
+	for i, snippetName := range m.filteredSnips {
+		if snippetName == name {
+			m.snippetCursor = i
+			break
+		}
+	}
+	if err := saveSnippets(m.snippets); err != nil {
+		m.status = fmt.Sprintf("save failed: %v", err)
+		return nil
+	}
+	m.closeSnippetEditor(fmt.Sprintf("snippet %q updated", name))
+	return nil
 }
 
 func (m *model) closeConfirm(status string) {

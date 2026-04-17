@@ -192,6 +192,21 @@ type volumeDetailsState struct {
 	err          string
 }
 
+type snippetEditorOption struct {
+	Name      string
+	Available bool
+}
+
+type snippetEditorState struct {
+	active       bool
+	nameFocused  bool
+	originalName string
+	nameInput    textinput.Model
+	options      []snippetEditorOption
+	cursor       int
+	marked       map[string]bool
+}
+
 type volumeBrowser struct {
 	active       bool
 	path         string
@@ -238,6 +253,7 @@ type model struct {
 	snippetMode     bool
 	snippetRun      bool
 	snippetBrowse   bool
+	snippetEditor   snippetEditorState
 	showHelp        bool
 	markMode        bool
 	marked          map[string]bool

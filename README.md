@@ -193,10 +193,12 @@ p
 - `j/k`: move
 - `space`: mark/unmark current snippet
 - `a`: mark/unmark all visible snippets
+- `e`: edit the current snippet in a popup, including renaming it and updating its container list
 - `x`: run `docker start` for selected snippets, or current snippet if none selected
 - `s`: run `docker stop` for selected snippets, or current snippet if none selected
 - `d`: delete selected snippets, or current snippet if none selected, with confirmation
 - `D`: delete all snippets, with confirmation
+- inside the edit popup: `tab` switches between the name field and container list, `space` toggles the highlighted container, `a` toggles all, `enter` saves, `esc` cancels
 - after `d` or `D`: `tab` or `←/→` switches Yes/No, `enter` confirms selected option, `esc` cancels
 
 ## Logs

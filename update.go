@@ -176,6 +176,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.confirm.active {
 			return m, m.handleConfirmKey(msg)
 		}
+		if m.snippetEditor.active {
+			return m.handleSnippetEditor(msg)
+		}
 		if m.commandMode {
 			return m.handleCommandMode(msg)
 		}
@@ -771,6 +774,81 @@ func (m model) handleSnippetBrowser(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.openSnippetDeleteConfirm(nil, true)
 		return m, nil
+	case "e":
+		name, ok := m.currentSnippetName()
+		if !ok {
+			m.status = "no snippet selected"
+			return m, nil
+		}
+		m.openSnippetEditor(name)
+		m.status = fmt.Sprintf("editing snippet %q", name)
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) handleSnippetEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.closeSnippetEditor("snippet edit cancelled")
+		return m, nil
+	case "tab":
+		m.snippetEditor.nameFocused = !m.snippetEditor.nameFocused
+		if m.snippetEditor.nameFocused {
+			m.snippetEditor.nameInput.Focus()
+		} else {
+			m.snippetEditor.nameInput.Blur()
+		}
+		return m, nil
+	case "enter":
+		return m, m.saveSnippetEditor()
+	}
+
+	if m.snippetEditor.nameFocused {
+		var cmd tea.Cmd
+		m.snippetEditor.nameInput, cmd = m.snippetEditor.nameInput.Update(msg)
+		return m, cmd
+	}
+
+	switch msg.String() {
+	case "j", "down":
+		if m.snippetEditor.cursor < len(m.snippetEditor.options)-1 {
+			m.snippetEditor.cursor++
+		}
+	case "k", "up":
+		if m.snippetEditor.cursor > 0 {
+			m.snippetEditor.cursor--
+		}
+	case "g":
+		m.snippetEditor.cursor = 0
+	case "G":
+		if len(m.snippetEditor.options) > 0 {
+			m.snippetEditor.cursor = len(m.snippetEditor.options) - 1
+		}
+	case " ", "space":
+		if m.snippetEditor.cursor >= 0 && m.snippetEditor.cursor < len(m.snippetEditor.options) {
+			name := m.snippetEditor.options[m.snippetEditor.cursor].Name
+			if m.snippetEditor.marked[name] {
+				delete(m.snippetEditor.marked, name)
+			} else {
+				m.snippetEditor.marked[name] = true
+			}
+		}
+	case "a":
+		allSelected := len(m.snippetEditor.options) > 0
+		for _, option := range m.snippetEditor.options {
+			if !m.snippetEditor.marked[option.Name] {
+				allSelected = false
+				break
+			}
+		}
+		for _, option := range m.snippetEditor.options {
+			if allSelected {
+				delete(m.snippetEditor.marked, option.Name)
+			} else {
+				m.snippetEditor.marked[option.Name] = true
+			}
+		}
 	}
 	return m, nil
 }
